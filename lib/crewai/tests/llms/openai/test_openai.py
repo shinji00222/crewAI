@@ -66,6 +66,20 @@ def test_custom_openai_flag_uses_native_openai_without_provider_prefix():
     assert rebuilt.base_url == "https://gateway.example/v1"
 
 
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"custom_openai": True, "base_url": "https://vllm.example/v1"},
+        {"base_url": "https://vllm.example/v1"},
+    ],
+)
+def test_openai_compatible_token_count_uses_character_fallback(kwargs):
+    """Compatible endpoints fall back when they lack Responses counting."""
+    llm = OpenAICompletion(model="custom-model", api_key="test-key", **kwargs)
+
+    assert llm.get_input_tokens_count("12345") == 2
+
+
 def test_custom_openai_flag_requires_custom_base_url():
     """Avoid routing arbitrary custom model ids to api.openai.com by mistake."""
     with patch.dict(os.environ, {"OPENAI_API_KEY": "test-key"}, clear=True):
@@ -824,6 +838,53 @@ def test_openai_input_token_count_uses_responses_without_changing_generation_api
     mock_completions.assert_called_once()
 
 
+def test_openai_input_token_count_uses_responses_file_format():
+    """File content is formatted for the Responses count endpoint."""
+    llm = OpenAICompletion(model="gpt-4o", api="completions")
+    client = MagicMock()
+    client.responses.input_tokens.count.return_value = MagicMock(input_tokens=17)
+
+    with (
+        patch.object(
+            llm,
+            "_format_messages",
+            return_value=[{"role": "user", "content": "Hello!"}],
+        ) as format_messages,
+        patch.object(llm, "_get_sync_client", return_value=client),
+    ):
+        assert llm.get_input_tokens_count("Hello!") == 17
+
+    format_messages.assert_called_once_with("Hello!", file_api="responses")
+
+
+@pytest.mark.parametrize(
+    ("previous_response_id", "auto_chain", "last_response_id"),
+    [
+        ("resp_explicit", False, None),
+        (None, True, "resp_auto_chain"),
+    ],
+)
+def test_openai_input_token_count_forwards_previous_response_id(
+    previous_response_id, auto_chain, last_response_id
+):
+    """Counting preserves the conversation context selected for generation."""
+    llm = OpenAICompletion(
+        model="gpt-4o",
+        previous_response_id=previous_response_id,
+        auto_chain=auto_chain,
+    )
+    llm._last_response_id = last_response_id
+    client = MagicMock()
+    client.responses.input_tokens.count.return_value = MagicMock(input_tokens=17)
+
+    with patch.object(llm, "_get_sync_client", return_value=client):
+        assert llm.get_input_tokens_count("Hello!") == 17
+
+    assert client.responses.input_tokens.count.call_args.kwargs[
+        "previous_response_id"
+    ] == (previous_response_id or last_response_id)
+
+
 def test_openai_input_token_count_forwards_responses_payload():
     """Messages, multimodal content, and tools use the Responses request shape."""
     llm = OpenAICompletion(model="gpt-4o", api="responses")
@@ -868,17 +929,16 @@ def test_openai_input_token_count_forwards_responses_payload():
     )
 
 
-def test_openai_input_token_count_propagates_api_errors():
-    """Callers can handle count-endpoint errors without a wrapped exception."""
+def test_openai_input_token_count_falls_back_after_api_errors(caplog):
+    """Count-endpoint errors fall back to the character estimate."""
     llm = OpenAICompletion(model="gpt-4o")
     client = MagicMock()
     client.responses.input_tokens.count.side_effect = RuntimeError("count failed")
 
-    with (
-        patch.object(llm, "_get_sync_client", return_value=client),
-        pytest.raises(RuntimeError, match="count failed"),
-    ):
-        llm.get_input_tokens_count("Hello!")
+    with patch.object(llm, "_get_sync_client", return_value=client):
+        assert llm.get_input_tokens_count("Hello!") == 2
+
+    assert "assuming one token per four characters" in caplog.text
 
 
 @pytest.mark.parametrize(

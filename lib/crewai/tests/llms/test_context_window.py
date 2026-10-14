@@ -133,7 +133,7 @@ def test_affected_model_ids_use_their_specific_context_windows(
         (
             "anthropic.claude-3-5-sonnet-20241022-v2:0",
             BEDROCK_CONTEXT_WINDOWS,
-            1_000_000,
+            200_000,
         ),
         ("us.anthropic.claude-opus-4-1-20250805-v1:0", BEDROCK_CONTEXT_WINDOWS, 200_000),
         (
